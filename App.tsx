@@ -280,10 +280,12 @@ const App: React.FC = () => {
     };
   }, [currentUser, activeRemoteSession]);
 
-  // 1. Basic Activity Listener
+  // 1. Basic Activity Listener (Backup for system monitoring)
   useEffect(() => {
       const handleActivity = () => {
+          // Always update activity timestamp on basic events as a fallback
           lastActivityTime.current = Date.now();
+          
           if (isIdleRef.current && currentUser && activeRemoteSession) {
               isIdleRef.current = false;
               setCurrentUserIsIdle(false);
@@ -321,7 +323,7 @@ const App: React.FC = () => {
       };
   }, [currentUser, activeRemoteSession]); 
 
-  // 2. Monitoring Logic
+  // 2. Monitoring Logic Interval
   useEffect(() => {
       if (activityTimerRef.current) clearInterval(activityTimerRef.current);
 
@@ -339,15 +341,19 @@ const App: React.FC = () => {
               const threshold = userRemoteSettings.inactivityThreshold || 5;
               let isIdle = false;
 
+              // Check System Idle State if detector is active
               if (idleDetectorRef.current && idleDetectorRef.current.userState) {
                   if (idleDetectorRef.current.userState === 'active') {
                       isIdle = false;
+                      // Sync fallback timer
                       lastActivityTime.current = Date.now();
                   } else {
-                      const inactiveMins = (Date.now() - lastActivityTime.current) / (1000 * 60);
-                      if (inactiveMins >= threshold) isIdle = true;
+                      // System reports idle or locked
+                      // We can trust system idle state directly or check timestamp
+                      isIdle = true;
                   }
               } else {
+                  // Fallback: Check JS event timestamp
                   const inactiveMins = (Date.now() - lastActivityTime.current) / (1000 * 60);
                   if (inactiveMins >= threshold) isIdle = true;
               }
@@ -383,27 +389,33 @@ const App: React.FC = () => {
   const startSystemIdleMonitoring = async () => {
       if ('IdleDetector' in window) {
           try {
-              const permission = await window.IdleDetector.requestPermission();
-              if (permission === 'granted') {
-                  if (idleAbortController.current) idleAbortController.current.abort();
-                  idleAbortController.current = new AbortController();
-                  const detector = new window.IdleDetector();
-                  detector.addEventListener('change', () => {
-                      if (detector.userState === 'active') {
-                          lastActivityTime.current = Date.now();
-                          if (isIdleRef.current) {
-                              // Force Resume Logic (similar to event listener)
-                              isIdleRef.current = false;
-                              setCurrentUserIsIdle(false);
-                              // ... log resume ...
-                          }
+              if (idleAbortController.current) idleAbortController.current.abort();
+              idleAbortController.current = new AbortController();
+              
+              const detector = new window.IdleDetector();
+              
+              detector.addEventListener('change', () => {
+                  if (detector.userState === 'active') {
+                      lastActivityTime.current = Date.now();
+                      if (isIdleRef.current) {
+                          // Force Resume Logic (similar to event listener)
+                          isIdleRef.current = false;
+                          setCurrentUserIsIdle(false);
                       }
-                  });
-                  await detector.start({ threshold: 60000, signal: idleAbortController.current.signal });
-                  idleDetectorRef.current = detector;
-                  return true;
-              }
-          } catch (err) { console.error(err); }
+                  }
+              });
+              
+              await detector.start({ 
+                  threshold: 60000, 
+                  signal: idleAbortController.current.signal 
+              });
+              
+              idleDetectorRef.current = detector;
+              return true;
+          } catch (err) { 
+              console.error("Idle detection permission failed or not supported:", err);
+              return false; 
+          }
       }
       return false;
   };
@@ -478,11 +490,47 @@ const App: React.FC = () => {
   
   const handleRemoteStart = async () => {
       if (!currentUser || isRemoteActionLoading) return;
+      
+      // Step 1: Explain monitoring to user and request interaction for permission
+      const result = await Swal.fire({
+          title: 'شروع دورکاری',
+          text: 'برای ثبت دقیق ساعت کاری، نیاز به دسترسی بررسی فعالیت سیستم داریم. لطفاً در پیام بعدی مرورگر دکمه Allow را بزنید.',
+          icon: 'info',
+          showCancelButton: true,
+          confirmButtonText: 'شروع و اعطای دسترسی',
+          cancelButtonText: 'انصراف'
+      });
+
+      if (!result.isConfirmed) return;
+
       setIsRemoteActionLoading(true);
 
       try {
         let systemMode = false;
-        if ('IdleDetector' in window) systemMode = await startSystemIdleMonitoring();
+        
+        // Step 2: Request Permission explicitly inside the user gesture handler
+        if ('IdleDetector' in window) {
+            try {
+                const permissionState = await window.IdleDetector.requestPermission();
+                if (permissionState === 'granted') {
+                    systemMode = await startSystemIdleMonitoring();
+                } else {
+                    console.warn("User denied idle detection permission.");
+                    // Optional: Show toast warning
+                    Swal.fire({
+                        icon: 'warning',
+                        title: 'دسترسی محدود',
+                        text: 'به دلیل عدم دسترسی به فعالیت سیستم، فقط فعالیت داخل مرورگر محاسبه می‌شود.',
+                        timer: 4000,
+                        showConfirmButton: false,
+                        toast: true,
+                        position: 'top'
+                    });
+                }
+            } catch (err) {
+                console.error("Error requesting idle permission:", err);
+            }
+        }
 
         const newSession: RemoteAttendance = {
             id: uuidv4(),

@@ -1,9 +1,10 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { Employee, RemoteWorkSettings, RemoteLog, RemoteAttendance } from '../types';
-import { Monitor, Lock, Settings2, Globe, Clock, X, Save, RotateCcw, MousePointer2, LayoutGrid, List, AlertTriangle, User, Coffee, PlayCircle, CalendarClock, Wifi, Calendar as CalendarIcon, Filter, Eye, ArrowRight, Download, Building2, Slash, Timer } from 'lucide-react';
+import { Monitor, Lock, Settings2, Globe, Clock, X, Save, RotateCcw, MousePointer2, LayoutGrid, List, AlertTriangle, User, Coffee, PlayCircle, CalendarClock, Wifi, Calendar as CalendarIcon, Filter, Eye, ArrowRight, Download, Building2, Slash, Timer, CloudUpload } from 'lucide-react';
 import UserAvatar from './UserAvatar';
 import { saveRemoteGlobalSettings, loadRemoteGlobalSettings, saveRemoteEmployeeSettings, loadRemoteEmployeeSettings, saveRemoteModulePurchased } from '../utils/storage';
+import { apiSaveAppSettings } from '../utils/api';
 import { toPersianDigits, toJalali } from '../utils/dateUtils';
 import Swal from 'sweetalert2';
 import DatePicker from "react-multi-date-picker";
@@ -125,13 +126,15 @@ const SettingsForm = ({
     onSave, 
     onCancel, 
     isGlobal,
-    onReset 
+    onReset,
+    isSaving
   }: { 
     initialData: RemoteWorkSettings, 
     onSave: (s: RemoteWorkSettings) => void, 
     onCancel: () => void,
     isGlobal: boolean,
-    onReset?: () => void
+    onReset?: () => void,
+    isSaving?: boolean
   }) => {
       const [formData, setFormData] = useState(initialData);
 
@@ -200,8 +203,13 @@ const SettingsForm = ({
                   )}
                   <div className="flex-1"></div>
                   <button onClick={onCancel} className="px-5 py-2 text-gray-600 hover:bg-gray-100 rounded-xl font-medium text-sm">انصراف</button>
-                  <button onClick={() => onSave(formData)} className="px-6 py-2 bg-primary text-white hover:bg-primary-hover rounded-xl font-medium text-sm shadow-lg shadow-primary/30">
-                      {isGlobal ? 'ذخیره تنظیمات سراسری' : 'ذخیره تنظیمات فردی'}
+                  <button 
+                    onClick={() => onSave(formData)} 
+                    disabled={isSaving}
+                    className="px-6 py-2 bg-primary text-white hover:bg-primary-hover rounded-xl font-medium text-sm shadow-lg shadow-primary/30 flex items-center gap-2 disabled:opacity-50"
+                  >
+                      {isSaving ? 'در حال ذخیره...' : (isGlobal ? 'ذخیره تنظیمات سراسری' : 'ذخیره تنظیمات فردی')}
+                      {!isSaving && <CloudUpload size={16} />}
                   </button>
               </div>
           </div>
@@ -635,6 +643,9 @@ const RemoteWork: React.FC<RemoteWorkProps> = ({ currentView, employees, logs = 
   
   const [isGlobalModalOpen, setIsGlobalModalOpen] = useState(false);
   const [editingEmployeeId, setEditingEmployeeId] = useState<string | null>(null);
+  
+  // Loading states for saving
+  const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
     const savedGlobal = loadRemoteGlobalSettings();
@@ -646,6 +657,7 @@ const RemoteWork: React.FC<RemoteWorkProps> = ({ currentView, employees, logs = 
     if (savedEmp) setEmployeeSettingsMap(savedEmp);
   }, []);
 
+  // Persist locally when state changes (for UI consistency)
   useEffect(() => {
     saveRemoteGlobalSettings(globalSettings);
   }, [globalSettings]);
@@ -662,14 +674,50 @@ const RemoteWork: React.FC<RemoteWorkProps> = ({ currentView, employees, logs = 
       return { settings: globalSettings, isCustom: false };
   };
 
-  const handleUpdateEmployeeSettings = (empId: string, newSettings: RemoteWorkSettings | undefined) => {
-      const updatedMap = { ...employeeSettingsMap };
-      if (newSettings === undefined) {
-          delete updatedMap[empId];
-      } else {
-          updatedMap[empId] = newSettings;
+  // --- Save Handlers (Updated to use API) ---
+  const handleSaveGlobalSettings = async (settings: RemoteWorkSettings) => {
+      setIsSaving(true);
+      try {
+          setGlobalSettings(settings);
+          // Save to server
+          await apiSaveAppSettings('remote_global', settings);
+          setIsGlobalModalOpen(false);
+          Swal.fire({ icon: 'success', title: 'ذخیره شد', text: 'تنظیمات سراسری با موفقیت اعمال شد.', timer: 2000, showConfirmButton: false });
+      } catch (error) {
+          console.error("Failed to save global settings", error);
+          Swal.fire('خطا', 'مشکلی در ذخیره تنظیمات روی سرور پیش آمد.', 'error');
+      } finally {
+          setIsSaving(false);
       }
-      setEmployeeSettingsMap(updatedMap);
+  };
+
+  const handleUpdateEmployeeSettings = async (empId: string, newSettings: RemoteWorkSettings | undefined) => {
+      setIsSaving(true);
+      try {
+          const updatedMap = { ...employeeSettingsMap };
+          if (newSettings === undefined) {
+              delete updatedMap[empId];
+          } else {
+              updatedMap[empId] = newSettings;
+          }
+          setEmployeeSettingsMap(updatedMap);
+          // Save all employee specific settings map to server
+          await apiSaveAppSettings('remote_emp_settings', updatedMap);
+          
+          setEditingEmployeeId(null);
+          Swal.fire({ 
+              icon: 'success', 
+              title: newSettings === undefined ? 'بازنشانی شد' : 'ذخیره شد', 
+              text: newSettings === undefined ? 'تنظیمات کاربر به حالت سراسری بازگشت.' : 'تنظیمات اختصاصی کاربر ذخیره شد.',
+              timer: 2000, 
+              showConfirmButton: false 
+          });
+      } catch (error) {
+          console.error("Failed to save employee settings", error);
+          Swal.fire('خطا', 'مشکلی در ذخیره تنظیمات روی سرور پیش آمد.', 'error');
+      } finally {
+          setIsSaving(false);
+      }
   };
 
   const handlePurchase = () => {
@@ -823,12 +871,9 @@ const RemoteWork: React.FC<RemoteWorkProps> = ({ currentView, employees, logs = 
                       <SettingsForm 
                           initialData={globalSettings}
                           isGlobal={true}
-                          onSave={(settings) => {
-                              setGlobalSettings(settings);
-                              setIsGlobalModalOpen(false);
-                              Swal.fire('ذخیره شد', 'تنظیمات سراسری با موفقیت اعمال شد.', 'success');
-                          }}
+                          onSave={handleSaveGlobalSettings}
                           onCancel={() => setIsGlobalModalOpen(false)}
+                          isSaving={isSaving}
                       />
                   </div>
               </div>
@@ -858,17 +903,10 @@ const RemoteWork: React.FC<RemoteWorkProps> = ({ currentView, employees, logs = 
                       <SettingsForm 
                           initialData={getEmployeeSettings(editingEmployeeId).settings}
                           isGlobal={false}
-                          onSave={(settings) => {
-                              handleUpdateEmployeeSettings(editingEmployeeId, settings);
-                              setEditingEmployeeId(null);
-                              Swal.fire('ذخیره شد', 'تنظیمات اختصاصی کاربر ذخیره شد.', 'success');
-                          }}
+                          onSave={(settings) => handleUpdateEmployeeSettings(editingEmployeeId, settings)}
                           onCancel={() => setEditingEmployeeId(null)}
-                          onReset={() => {
-                               handleUpdateEmployeeSettings(editingEmployeeId, undefined);
-                               setEditingEmployeeId(null);
-                               Swal.fire('بازنشانی شد', 'تنظیمات کاربر به حالت سراسری بازگشت.', 'success');
-                          }}
+                          onReset={() => handleUpdateEmployeeSettings(editingEmployeeId, undefined)}
+                          isSaving={isSaving}
                       />
                   </div>
               </div>
