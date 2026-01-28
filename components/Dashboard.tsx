@@ -2,7 +2,7 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { Task, TaskStatus, Employee, Role, AssigneeType, TimeLog, TaskPriority, RemoteLog, RemoteAttendance, RemoteWorkSettings } from '../types';
 import { isOverdue, isNearDeadline, toJalali, toPersianDigits } from '../utils/dateUtils';
-import { Activity, CheckCircle2, AlertTriangle, Clock, Calendar, PlayCircle, Play, Pause, Square, Timer, CheckSquare, Coffee, Eye, X, StopCircle, Check, AlertCircle, ListTodo, Monitor, Video, Radio, Power, Wifi, MousePointer2, Loader2 } from 'lucide-react';
+import { Activity, CheckCircle2, AlertTriangle, Clock, Calendar, PlayCircle, Play, Pause, Square, Timer, CheckSquare, Coffee, Eye, X, StopCircle, Check, AlertCircle, ListTodo, Monitor, Video, Radio, Power, Wifi, MousePointer2, Loader2, Globe, Laptop } from 'lucide-react';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend, Label } from 'recharts';
 import { v4 as uuidv4 } from 'uuid';
 import Swal from 'sweetalert2';
@@ -27,6 +27,7 @@ interface DashboardProps {
   remoteSettings?: RemoteWorkSettings;
   isIdle?: boolean;
   isRemoteActionLoading?: boolean;
+  monitoringType?: 'SYSTEM' | 'BROWSER'; // New Prop
 }
 
 // Memoized Chart Component to prevent re-renders on timer ticks
@@ -127,12 +128,14 @@ const RemoteAttendanceToolbar = ({
     session, 
     actions,
     isIdle,
-    isLoading
+    isLoading,
+    monitoringType
 }: { 
     session: RemoteAttendance | null | undefined, 
     actions: { start: () => void, break: () => void, resume: () => void, end: () => void },
     isIdle?: boolean,
-    isLoading?: boolean
+    isLoading?: boolean,
+    monitoringType?: 'SYSTEM' | 'BROWSER'
 }) => {
     const [elapsed, setElapsed] = useState(0);
 
@@ -219,18 +222,24 @@ const RemoteAttendanceToolbar = ({
                         }`}>
                             {formatTime(elapsed)}
                         </span>
-                        <span className="text-xs opacity-60">زمان مفید</span>
+                        
+                        {!isBreak && monitoringType && (
+                            <span className={`flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border ${monitoringType === 'SYSTEM' ? 'bg-green-100 text-green-700 border-green-200' : 'bg-orange-100 text-orange-700 border-orange-200'}`}>
+                                {monitoringType === 'SYSTEM' ? <Monitor size={10}/> : <Globe size={10}/>}
+                                {monitoringType === 'SYSTEM' ? 'مانیتورینگ سیستم' : 'فقط تب مرورگر'}
+                            </span>
+                        )}
                     </div>
                     {showIdleAlert && (
                          <p className="text-[10px] text-red-600 mt-1 font-bold">
-                             لطفاً موس یا کیبورد را حرکت دهید
+                             {monitoringType === 'SYSTEM' ? 'سیستم قفل شده یا بدون فعالیت است' : 'لطفاً به تب مرورگر برگردید و موس را حرکت دهید'}
                          </p>
                     )}
-                    {!showIdleAlert && (
-                         <div className="mt-2 bg-red-100 border-2 border-red-200 rounded-xl p-2 flex items-center gap-2 shadow-sm">
-                             <AlertTriangle size={18} className="text-red-600 shrink-0" />
-                             <p className="text-sm text-red-700 font-black">
-                                 توجه: بستن تب مرورگر = پایان کار
+                    {!showIdleAlert && !isBreak && monitoringType === 'BROWSER' && (
+                         <div className="mt-2 bg-orange-50 border border-orange-200 rounded-lg p-1.5 flex items-center gap-1.5">
+                             <AlertTriangle size={12} className="text-orange-500 shrink-0" />
+                             <p className="text-[10px] text-orange-700 font-medium">
+                                 توجه: مانیتورینگ فقط در این تب فعال است. با تغییر تب، عدم فعالیت ثبت می‌شود.
                              </p>
                          </div>
                     )}
@@ -284,7 +293,8 @@ const Dashboard: React.FC<DashboardProps> = ({
     onRemoteAction,
     remoteSettings,
     isIdle,
-    isRemoteActionLoading
+    isRemoteActionLoading,
+    monitoringType
 }) => {
   const isEmployee = currentUser?.role === Role.EMPLOYEE;
   const isAdmin = currentUser?.role === Role.ADMIN;
@@ -808,6 +818,7 @@ const Dashboard: React.FC<DashboardProps> = ({
             actions={onRemoteAction} 
             isIdle={isIdle}
             isLoading={isRemoteActionLoading}
+            monitoringType={monitoringType}
           />
       )}
 

@@ -1,5 +1,5 @@
 
-import { supabase } from './supabaseClient';
+import { supabase, supabaseUrl, supabaseKey } from './supabaseClient';
 import { Task, Employee, CalendarEvent, PersonalTask, Correspondence, RemoteLog, RemoteAttendance, RemoteWorkSettings } from '../types';
 import { RealtimeChannel } from '@supabase/supabase-js';
 
@@ -177,6 +177,37 @@ export const apiSaveRemoteAttendance = async (session: RemoteAttendance) => {
       const breaksWithId = breaks.map(b => ({ ...b, attendanceId: session.id }));
       await supabase.from('remote_breaks').insert(breaksWithId);
   }
+};
+
+/**
+ * Emergency Save for Tab Close (Unload)
+ * Uses native fetch with keepalive: true to ensure request survives page termination.
+ */
+export const apiEmergencyCloseSession = (session: RemoteAttendance) => {
+    const { breaks, ...sessionData } = session;
+    
+    // Construct the REST API URL for the 'remote_attendance' table
+    const url = `${supabaseUrl}/rest/v1/remote_attendance?id=eq.${session.id}`;
+    
+    // Send data using keepalive
+    // Note: upsert in REST via POST requires Prefer: resolution=merge-duplicates or using PATCH for update
+    // Here we assume ID exists, so PATCH is safer, but keepalive is restrictive on headers.
+    // Standard approach: POST with upsert preference.
+    
+    fetch(url, {
+        method: 'PATCH',
+        headers: {
+            'Content-Type': 'application/json',
+            'apikey': supabaseKey,
+            'Authorization': `Bearer ${supabaseKey}`,
+            'Prefer': 'return=minimal'
+        },
+        body: JSON.stringify(sessionData),
+        keepalive: true
+    }).catch(err => console.error("Emergency save failed", err));
+
+    // Also close breaks if any (Best effort, might hit limit of keepalive size/count)
+    // It is often safer to just close the main session status to 'COMPLETED'
 };
 
 // --- Settings ---

@@ -33,7 +33,8 @@ import {
     apiFetchRemoteAttendance, apiSaveRemoteAttendance,
     apiFetchAppSettings, apiSaveAppSettings,
     apiSubscribe,
-    apiDeleteComment
+    apiDeleteComment,
+    apiEmergencyCloseSession // Imported new function
 } from './utils/api';
 import { loadReadNotifsFromStorage, saveReadNotifsToStorage, saveRemoteModulePurchased } from './utils/storage'; 
 
@@ -99,6 +100,9 @@ const App: React.FC = () => {
   const activityTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const idleDetectorRef = useRef<IdleDetector | null>(null);
   const idleAbortController = useRef<AbortController | null>(null);
+  
+  // New State to track monitoring type
+  const [monitoringType, setMonitoringType] = useState<'SYSTEM' | 'BROWSER' | undefined>(undefined);
 
   // Detect active task for current user
   const currentActiveTask = React.useMemo(() => {
@@ -227,21 +231,22 @@ const App: React.FC = () => {
 
   // --- LIFECYCLE HANDLERS (Tab Close / Refresh) ---
   useEffect(() => {
+    // 1. Before Unload: Prompt user (if supported)
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (activeRemoteSession) {
+      if (activeRemoteSession && activeRemoteSession.status !== 'COMPLETED') {
         e.preventDefault();
         e.returnValue = 'با بستن تب برای شما پایان ثبت میشود';
         return 'با بستن تب برای شما پایان ثبت میشود';
       }
     };
 
+    // 2. Unload: Emergency Save
     const handleUnload = () => {
-      if (!currentUser || !activeRemoteSession) return;
+      if (!currentUser || !activeRemoteSession || activeRemoteSession.status === 'COMPLETED') return;
       
       // Stop Idle Detector
       if (idleAbortController.current) idleAbortController.current.abort();
 
-      // Synchronous End Logic (Best Effort)
       const now = new Date();
       const endTimeStr = now.toISOString();
       
@@ -268,10 +273,12 @@ const App: React.FC = () => {
           terminationReason: 'AUTO_CLOSE'
       };
 
-      apiSaveRemoteAttendance(completedSession); 
+      // USE NEW EMERGENCY FUNCTION
+      apiEmergencyCloseSession(completedSession); 
     };
 
     window.addEventListener('beforeunload', handleBeforeUnload);
+    // Visibility change is often more reliable on mobile, but unload is standard for desktop tab close
     window.addEventListener('unload', handleUnload);
 
     return () => {
@@ -287,26 +294,29 @@ const App: React.FC = () => {
           lastActivityTime.current = Date.now();
           
           if (isIdleRef.current && currentUser && activeRemoteSession) {
-              isIdleRef.current = false;
-              setCurrentUserIsIdle(false);
+              // Only resume if using Browser Monitoring or if System Detector is Active
+              if (monitoringType === 'BROWSER' || (idleDetectorRef.current?.userState === 'active')) {
+                  isIdleRef.current = false;
+                  setCurrentUserIsIdle(false);
 
-              let durationMinutes = 0;
-              if (idleStartTimeRef.current) {
-                  durationMinutes = Math.floor((Date.now() - idleStartTimeRef.current) / 60000);
+                  let durationMinutes = 0;
+                  if (idleStartTimeRef.current) {
+                      durationMinutes = Math.floor((Date.now() - idleStartTimeRef.current) / 60000);
+                  }
+
+                  const newLog: RemoteLog = {
+                      id: uuidv4(),
+                      userId: currentUser.id,
+                      taskId: activeRemoteSession.id, 
+                      timestamp: new Date().toISOString(),
+                      type: 'ACTIVITY_RESUMED',
+                      activityLevel: 'ACTIVE',
+                      description: `بازگشت به کار پس از ${durationMinutes > 0 ? toPersianDigits(durationMinutes) + ' دقیقه' : 'مدتی'} عدم فعالیت.`
+                  };
+                  setRemoteLogs(prev => [...prev, newLog]);
+                  apiSaveRemoteLog(newLog); // API
+                  idleStartTimeRef.current = null;
               }
-
-              const newLog: RemoteLog = {
-                  id: uuidv4(),
-                  userId: currentUser.id,
-                  taskId: activeRemoteSession.id, 
-                  timestamp: new Date().toISOString(),
-                  type: 'ACTIVITY_RESUMED',
-                  activityLevel: 'ACTIVE',
-                  description: `بازگشت به کار پس از ${durationMinutes > 0 ? toPersianDigits(durationMinutes) + ' دقیقه' : 'مدتی'} عدم فعالیت.`
-              };
-              setRemoteLogs(prev => [...prev, newLog]);
-              apiSaveRemoteLog(newLog); // API
-              idleStartTimeRef.current = null;
           }
       };
       
@@ -321,7 +331,7 @@ const App: React.FC = () => {
           window.removeEventListener('click', handleActivity);
           window.removeEventListener('scroll', handleActivity);
       };
-  }, [currentUser, activeRemoteSession]); 
+  }, [currentUser, activeRemoteSession, monitoringType]); 
 
   // 2. Monitoring Logic Interval
   useEffect(() => {
@@ -342,20 +352,32 @@ const App: React.FC = () => {
               let isIdle = false;
 
               // Check System Idle State if detector is active
-              if (idleDetectorRef.current && idleDetectorRef.current.userState) {
-                  if (idleDetectorRef.current.userState === 'active') {
+              if (idleDetectorRef.current && monitoringType === 'SYSTEM') {
+                  const state = idleDetectorRef.current.userState;
+                  const screen = idleDetectorRef.current.screenState;
+                  
+                  if (state === 'active' && screen === 'unlocked') {
                       isIdle = false;
-                      // Sync fallback timer
+                      // Sync fallback timer to keep it fresh
                       lastActivityTime.current = Date.now();
                   } else {
                       // System reports idle or locked
-                      // We can trust system idle state directly or check timestamp
+                      // IdleDetector threshold is usually 60s. We respect user setting here? 
+                      // Actually, if detector says idle (min 60s), it's idle.
+                      // But we want to trigger alert only if user-defined threshold met.
+                      // Since we can't get "duration" from IdleDetector easily without our own timer, we rely on lastActivityTime
+                      // However, lastActivityTime is NOT updated if detector is idle. So diff grows.
                       isIdle = true;
                   }
-              } else {
-                  // Fallback: Check JS event timestamp
-                  const inactiveMins = (Date.now() - lastActivityTime.current) / (1000 * 60);
-                  if (inactiveMins >= threshold) isIdle = true;
+              }
+
+              // Fallback / Calculation logic
+              // If system is active (or we are in browser mode), lastActivityTime is updated by events.
+              // If system is idle, lastActivityTime is NOT updated.
+              const inactiveMins = (Date.now() - lastActivityTime.current) / (1000 * 60);
+              
+              if (inactiveMins >= threshold) {
+                  isIdle = true;
               }
 
               if (isIdle) {
@@ -371,7 +393,7 @@ const App: React.FC = () => {
                           timestamp: new Date().toISOString(),
                           type: 'ACTIVITY_ALERT',
                           activityLevel: 'IDLE',
-                          description: `عدم فعالیت ${idleDetectorRef.current ? '(سیستمی)' : '(مرورگر)'} بیش از ${toPersianDigits(threshold)} دقیقه`
+                          description: `عدم فعالیت ${monitoringType === 'SYSTEM' ? '(سیستمی)' : '(مرورگر)'} بیش از ${toPersianDigits(threshold)} دقیقه`
                       };
                       setRemoteLogs(prev => [...prev, newLog]);
                       apiSaveRemoteLog(newLog); // API
@@ -383,7 +405,7 @@ const App: React.FC = () => {
       return () => {
           if (activityTimerRef.current) clearInterval(activityTimerRef.current);
       };
-  }, [activeRemoteSession, currentUser, isRemoteModulePurchased, userRemoteSettings]); 
+  }, [activeRemoteSession, currentUser, isRemoteModulePurchased, userRemoteSettings, monitoringType]); 
 
   // --- Helper to start Idle Detector ---
   const startSystemIdleMonitoring = async () => {
@@ -395,28 +417,41 @@ const App: React.FC = () => {
               const detector = new window.IdleDetector();
               
               detector.addEventListener('change', () => {
-                  if (detector.userState === 'active') {
+                  const uState = detector.userState;
+                  const sState = detector.screenState;
+                  // console.log(`Idle change: ${uState}, ${sState}`);
+                  
+                  if (uState === 'active' && sState === 'unlocked') {
+                      // System is active again.
+                      // We update the local timestamp so our interval logic knows we are back.
                       lastActivityTime.current = Date.now();
+                      
+                      // Explicit resume logic if we were idle
                       if (isIdleRef.current) {
-                          // Force Resume Logic (similar to event listener)
                           isIdleRef.current = false;
                           setCurrentUserIsIdle(false);
+                          // Log resume? The interval logic or mousemove handler usually does it, 
+                          // but for system events (like unlocking screen without moving mouse over browser), we force it here.
+                          // Ideally wait for next interval or mouse move to log resume to avoid spam.
                       }
                   }
               });
               
               await detector.start({ 
-                  threshold: 60000, 
+                  threshold: 60000, // Minimum 60s for API
                   signal: idleAbortController.current.signal 
               });
               
               idleDetectorRef.current = detector;
+              setMonitoringType('SYSTEM');
               return true;
           } catch (err) { 
               console.error("Idle detection permission failed or not supported:", err);
+              setMonitoringType('BROWSER');
               return false; 
           }
       }
+      setMonitoringType('BROWSER');
       return false;
   };
 
@@ -484,6 +519,7 @@ const App: React.FC = () => {
     setIsSidebarOpen(false);
     if (idleAbortController.current) idleAbortController.current.abort();
     idleDetectorRef.current = null;
+    setMonitoringType(undefined);
   };
 
   // --- Remote Attendance Handlers (Improved with Loading Lock & Optimistic Updates) ---
@@ -516,6 +552,7 @@ const App: React.FC = () => {
                     systemMode = await startSystemIdleMonitoring();
                 } else {
                     console.warn("User denied idle detection permission.");
+                    setMonitoringType('BROWSER');
                     // Optional: Show toast warning
                     Swal.fire({
                         icon: 'warning',
@@ -529,7 +566,10 @@ const App: React.FC = () => {
                 }
             } catch (err) {
                 console.error("Error requesting idle permission:", err);
+                setMonitoringType('BROWSER');
             }
+        } else {
+            setMonitoringType('BROWSER');
         }
 
         const newSession: RemoteAttendance = {
@@ -651,6 +691,7 @@ const App: React.FC = () => {
 
                 setCurrentUserIsIdle(false);
                 isIdleRef.current = false;
+                setMonitoringType(undefined);
                 Swal.fire('خسته نباشید', 'ساعت پایان کار ثبت شد.', 'success');
               } finally {
                   setIsRemoteActionLoading(false);
@@ -937,6 +978,7 @@ const App: React.FC = () => {
                             remoteSettings={userRemoteSettings}
                             isIdle={currentUserIsIdle}
                             isRemoteActionLoading={isRemoteActionLoading}
+                            monitoringType={monitoringType} // Pass monitoring type
                         />
                     )}
                     {currentView === 'tasks' && <Tasks tasks={activeTasks} employees={employees} currentUser={currentUser} onAddTask={handleAddTask} onUpdateTask={handleUpdateTask} onDeleteTask={handleDeleteTask} onAddComment={handleAddComment} onEditComment={handleEditComment} onDeleteComment={handleDeleteComment} />}
