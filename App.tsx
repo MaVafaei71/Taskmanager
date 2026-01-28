@@ -34,7 +34,7 @@ import {
     apiFetchAppSettings, apiSaveAppSettings,
     apiSubscribe,
     apiDeleteComment,
-    apiEmergencyCloseSession // Imported new function
+    apiEmergencyCloseSession
 } from './utils/api';
 import { loadReadNotifsFromStorage, saveReadNotifsToStorage, saveRemoteModulePurchased } from './utils/storage'; 
 
@@ -43,6 +43,20 @@ const DEFAULT_REMOTE_SETTINGS: RemoteWorkSettings = {
   checkInactivity: false,
   inactivityThreshold: 5,
 };
+
+// --- Web Worker Blob for Background Timer ---
+// This ensures setInterval runs even when tab is inactive/minimized
+const workerCode = `
+self.onmessage = function(e) {
+    if (e.data === 'start') {
+        self.intervalId = setInterval(function() {
+            self.postMessage('tick');
+        }, 5000); // Check every 5 seconds
+    } else if (e.data === 'stop') {
+        clearInterval(self.intervalId);
+    }
+};
+`;
 
 const App: React.FC = () => {
   // Auth State
@@ -97,7 +111,7 @@ const App: React.FC = () => {
 
   // --- REMOTE WORK MONITORING ENGINE ---
   const lastActivityTime = useRef<number>(Date.now());
-  const activityTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timerWorkerRef = useRef<Worker | null>(null);
   const idleDetectorRef = useRef<IdleDetector | null>(null);
   const idleAbortController = useRef<AbortController | null>(null);
   
@@ -333,9 +347,13 @@ const App: React.FC = () => {
       };
   }, [currentUser, activeRemoteSession, monitoringType]); 
 
-  // 2. Monitoring Logic Interval
+  // 2. Monitoring Logic Interval using Web Worker (Fix for Minimized Tabs)
   useEffect(() => {
-      if (activityTimerRef.current) clearInterval(activityTimerRef.current);
+      // Clean up previous worker if any
+      if (timerWorkerRef.current) {
+          timerWorkerRef.current.terminate();
+          timerWorkerRef.current = null;
+      }
 
       if (!currentUser || !activeRemoteSession || !isRemoteModulePurchased) return;
       if (activeRemoteSession.status === 'BREAK') {
@@ -347,63 +365,71 @@ const App: React.FC = () => {
       if (!userRemoteSettings.isEnabled) return;
 
       if (userRemoteSettings.checkInactivity) {
-          activityTimerRef.current = setInterval(() => {
-              const threshold = userRemoteSettings.inactivityThreshold || 5;
-              let isIdle = false;
+          // Create worker
+          const blob = new Blob([workerCode], { type: "application/javascript" });
+          const worker = new Worker(URL.createObjectURL(blob));
+          timerWorkerRef.current = worker;
 
-              // Check System Idle State if detector is active
-              if (idleDetectorRef.current && monitoringType === 'SYSTEM') {
-                  const state = idleDetectorRef.current.userState;
-                  const screen = idleDetectorRef.current.screenState;
+          // Start the worker timer
+          worker.postMessage('start');
+
+          worker.onmessage = (e) => {
+              if (e.data === 'tick') {
+                  const threshold = userRemoteSettings.inactivityThreshold || 5;
+                  let isIdle = false;
+
+                  // Check System Idle State if detector is active
+                  if (idleDetectorRef.current && monitoringType === 'SYSTEM') {
+                      const state = idleDetectorRef.current.userState;
+                      const screen = idleDetectorRef.current.screenState;
+                      
+                      if (state === 'active' && screen === 'unlocked') {
+                          isIdle = false;
+                          // Sync fallback timer to keep it fresh
+                          lastActivityTime.current = Date.now();
+                      } else {
+                          // System reports idle or locked
+                          isIdle = true;
+                      }
+                  }
+
+                  // Fallback / Calculation logic (Also used if monitoringType is BROWSER)
+                  // If system is active (or we are in browser mode), lastActivityTime is updated by events.
+                  // If system is idle, lastActivityTime is NOT updated.
+                  const inactiveMins = (Date.now() - lastActivityTime.current) / (1000 * 60);
                   
-                  if (state === 'active' && screen === 'unlocked') {
-                      isIdle = false;
-                      // Sync fallback timer to keep it fresh
-                      lastActivityTime.current = Date.now();
-                  } else {
-                      // System reports idle or locked
-                      // IdleDetector threshold is usually 60s. We respect user setting here? 
-                      // Actually, if detector says idle (min 60s), it's idle.
-                      // But we want to trigger alert only if user-defined threshold met.
-                      // Since we can't get "duration" from IdleDetector easily without our own timer, we rely on lastActivityTime
-                      // However, lastActivityTime is NOT updated if detector is idle. So diff grows.
+                  if (inactiveMins >= threshold) {
                       isIdle = true;
                   }
-              }
 
-              // Fallback / Calculation logic
-              // If system is active (or we are in browser mode), lastActivityTime is updated by events.
-              // If system is idle, lastActivityTime is NOT updated.
-              const inactiveMins = (Date.now() - lastActivityTime.current) / (1000 * 60);
-              
-              if (inactiveMins >= threshold) {
-                  isIdle = true;
-              }
+                  if (isIdle) {
+                      if (!isIdleRef.current) {
+                          isIdleRef.current = true;
+                          setCurrentUserIsIdle(true);
+                          idleStartTimeRef.current = Date.now();
 
-              if (isIdle) {
-                  if (!isIdleRef.current) {
-                      isIdleRef.current = true;
-                      setCurrentUserIsIdle(true);
-                      idleStartTimeRef.current = Date.now();
-
-                      const newLog: RemoteLog = {
-                          id: uuidv4(),
-                          userId: currentUser.id,
-                          taskId: activeRemoteSession.id, 
-                          timestamp: new Date().toISOString(),
-                          type: 'ACTIVITY_ALERT',
-                          activityLevel: 'IDLE',
-                          description: `عدم فعالیت ${monitoringType === 'SYSTEM' ? '(سیستمی)' : '(مرورگر)'} بیش از ${toPersianDigits(threshold)} دقیقه`
-                      };
-                      setRemoteLogs(prev => [...prev, newLog]);
-                      apiSaveRemoteLog(newLog); // API
+                          const newLog: RemoteLog = {
+                              id: uuidv4(),
+                              userId: currentUser.id,
+                              taskId: activeRemoteSession.id, 
+                              timestamp: new Date().toISOString(),
+                              type: 'ACTIVITY_ALERT',
+                              activityLevel: 'IDLE',
+                              description: `عدم فعالیت ${monitoringType === 'SYSTEM' ? '(سیستمی)' : '(مرورگر)'} بیش از ${toPersianDigits(threshold)} دقیقه`
+                          };
+                          setRemoteLogs(prev => [...prev, newLog]);
+                          apiSaveRemoteLog(newLog); // API
+                      }
                   }
               }
-          }, 5000); 
+          };
       }
 
       return () => {
-          if (activityTimerRef.current) clearInterval(activityTimerRef.current);
+          if (timerWorkerRef.current) {
+              timerWorkerRef.current.terminate();
+              timerWorkerRef.current = null;
+          }
       };
   }, [activeRemoteSession, currentUser, isRemoteModulePurchased, userRemoteSettings, monitoringType]); 
 
@@ -430,9 +456,8 @@ const App: React.FC = () => {
                       if (isIdleRef.current) {
                           isIdleRef.current = false;
                           setCurrentUserIsIdle(false);
-                          // Log resume? The interval logic or mousemove handler usually does it, 
-                          // but for system events (like unlocking screen without moving mouse over browser), we force it here.
-                          // Ideally wait for next interval or mouse move to log resume to avoid spam.
+                          // We rely on the regular interval to catch state changes for logging, 
+                          // but updating lastActivityTime is critical here.
                       }
                   }
               });
@@ -519,6 +544,7 @@ const App: React.FC = () => {
     setIsSidebarOpen(false);
     if (idleAbortController.current) idleAbortController.current.abort();
     idleDetectorRef.current = null;
+    if (timerWorkerRef.current) timerWorkerRef.current.terminate();
     setMonitoringType(undefined);
   };
 
@@ -663,6 +689,10 @@ const App: React.FC = () => {
                 if (idleAbortController.current) {
                     idleAbortController.current.abort();
                     idleDetectorRef.current = null;
+                }
+                if (timerWorkerRef.current) {
+                    timerWorkerRef.current.terminate();
+                    timerWorkerRef.current = null;
                 }
 
                 const newBreaks = [...activeRemoteSession.breaks];

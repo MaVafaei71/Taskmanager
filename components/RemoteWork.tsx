@@ -4,7 +4,7 @@ import { Employee, RemoteWorkSettings, RemoteLog, RemoteAttendance } from '../ty
 import { Monitor, Lock, Settings2, Globe, Clock, X, Save, RotateCcw, MousePointer2, LayoutGrid, List, AlertTriangle, User, Coffee, PlayCircle, CalendarClock, Wifi, Calendar as CalendarIcon, Filter, Eye, ArrowRight, Download, Building2, Slash, Timer, CloudUpload } from 'lucide-react';
 import UserAvatar from './UserAvatar';
 import { saveRemoteGlobalSettings, loadRemoteGlobalSettings, saveRemoteEmployeeSettings, loadRemoteEmployeeSettings, saveRemoteModulePurchased } from '../utils/storage';
-import { apiSaveAppSettings } from '../utils/api';
+import { apiSaveAppSettings, apiFetchAppSettings } from '../utils/api';
 import { toPersianDigits, toJalali } from '../utils/dateUtils';
 import Swal from 'sweetalert2';
 import DatePicker from "react-multi-date-picker";
@@ -137,6 +137,11 @@ const SettingsForm = ({
     isSaving?: boolean
   }) => {
       const [formData, setFormData] = useState(initialData);
+
+      // Sync form data if initial data changes (e.g. after fetching)
+      useEffect(() => {
+          setFormData(initialData);
+      }, [initialData]);
 
       return (
           <div className="space-y-6">
@@ -647,24 +652,25 @@ const RemoteWork: React.FC<RemoteWorkProps> = ({ currentView, employees, logs = 
   // Loading states for saving
   const [isSaving, setIsSaving] = useState(false);
 
+  // Initialize data on mount from API
   useEffect(() => {
-    const savedGlobal = loadRemoteGlobalSettings();
-    if (savedGlobal) {
-        setGlobalSettings({ ...DEFAULT_SETTINGS, ...savedGlobal });
-    }
+    const fetchData = async () => {
+        try {
+            const savedGlobal = await apiFetchAppSettings('remote_global');
+            if (savedGlobal) {
+                setGlobalSettings({ ...DEFAULT_SETTINGS, ...savedGlobal });
+            }
 
-    const savedEmp = loadRemoteEmployeeSettings();
-    if (savedEmp) setEmployeeSettingsMap(savedEmp);
+            const savedEmp = await apiFetchAppSettings('remote_emp_settings');
+            if (savedEmp) {
+                setEmployeeSettingsMap(savedEmp);
+            }
+        } catch (e) {
+            console.error("Failed to fetch settings", e);
+        }
+    };
+    fetchData();
   }, []);
-
-  // Persist locally when state changes (for UI consistency)
-  useEffect(() => {
-    saveRemoteGlobalSettings(globalSettings);
-  }, [globalSettings]);
-
-  useEffect(() => {
-    saveRemoteEmployeeSettings(employeeSettingsMap);
-  }, [employeeSettingsMap]);
 
   // --- Logic Helpers ---
   const getEmployeeSettings = (empId: string): { settings: RemoteWorkSettings, isCustom: boolean } => {
