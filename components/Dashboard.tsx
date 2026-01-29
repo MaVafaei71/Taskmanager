@@ -984,8 +984,8 @@ const Dashboard: React.FC<DashboardProps> = ({
                          {activeRemoteSessions.map(({session, emp}, idx) => {
                              const isBreak = session.status === 'BREAK';
                              
-                             // Calculate Idle State based on latest log
-                             const userLogs = remoteLogs.filter(l => l.userId === emp.id).sort((a,b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+                             // Calculate Idle State based on latest log SPECIFIC TO THIS SESSION
+                             const userLogs = remoteLogs.filter(l => l.taskId === session.id).sort((a,b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
                              const lastLog = userLogs[0];
                              const isIdle = !isBreak && lastLog && lastLog.type === 'ACTIVITY_ALERT' && (Date.now() - new Date(lastLog.timestamp).getTime() < 12 * 60 * 60 * 1000);
 

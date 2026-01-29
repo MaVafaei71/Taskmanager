@@ -115,6 +115,10 @@ const App: React.FC = () => {
   const idleDetectorRef = useRef<IdleDetector | null>(null);
   const idleAbortController = useRef<AbortController | null>(null);
   
+  // Refs for accessing fresh state inside Event Listeners/Workers without re-binding
+  const activeSessionRef = useRef<RemoteAttendance | null>(null);
+  const currentUserRef = useRef<Employee | null>(null);
+  
   // New State to track monitoring type
   const [monitoringType, setMonitoringType] = useState<'SYSTEM' | 'BROWSER' | undefined>(undefined);
 
@@ -136,6 +140,12 @@ const App: React.FC = () => {
           r => r.userId === currentUser.id && r.status !== 'COMPLETED'
       ) || null;
   }, [remoteAttendance, currentUser]);
+
+  // Update Refs whenever critical state changes
+  useEffect(() => {
+      activeSessionRef.current = activeRemoteSession;
+      currentUserRef.current = currentUser;
+  }, [activeRemoteSession, currentUser]);
 
   // --- INITIAL DATA FETCHING ---
   useEffect(() => {
@@ -301,36 +311,46 @@ const App: React.FC = () => {
     };
   }, [currentUser, activeRemoteSession]);
 
-  // 1. Basic Activity Listener (Backup for system monitoring)
+  // --- CENTRALIZED RESUME LOGIC ---
+  // This is used by both the Browser listeners AND the System Idle Detector
+  const triggerResumeFromIdle = () => {
+      if (isIdleRef.current && currentUserRef.current && activeSessionRef.current) {
+          isIdleRef.current = false;
+          setCurrentUserIsIdle(false);
+
+          let durationMinutes = 0;
+          if (idleStartTimeRef.current) {
+              durationMinutes = Math.floor((Date.now() - idleStartTimeRef.current) / 60000);
+          }
+
+          const newLog: RemoteLog = {
+              id: uuidv4(),
+              userId: currentUserRef.current.id,
+              taskId: activeSessionRef.current.id, 
+              timestamp: new Date().toISOString(),
+              type: 'ACTIVITY_RESUMED',
+              activityLevel: 'ACTIVE',
+              description: `بازگشت به کار پس از ${durationMinutes > 0 ? toPersianDigits(durationMinutes) + ' دقیقه' : 'مدتی'} عدم فعالیت.`
+          };
+          
+          setRemoteLogs(prev => [...prev, newLog]);
+          apiSaveRemoteLog(newLog); // API
+          idleStartTimeRef.current = null;
+          
+          // IMPORTANT: Update fallback timer as well
+          lastActivityTime.current = Date.now();
+      }
+  };
+
+  // 1. Basic Activity Listener (Backup & Browser Monitoring)
   useEffect(() => {
       const handleActivity = () => {
           // Always update activity timestamp on basic events as a fallback
           lastActivityTime.current = Date.now();
           
-          if (isIdleRef.current && currentUser && activeRemoteSession) {
-              // Only resume if using Browser Monitoring or if System Detector is Active
-              if (monitoringType === 'BROWSER' || (idleDetectorRef.current?.userState === 'active')) {
-                  isIdleRef.current = false;
-                  setCurrentUserIsIdle(false);
-
-                  let durationMinutes = 0;
-                  if (idleStartTimeRef.current) {
-                      durationMinutes = Math.floor((Date.now() - idleStartTimeRef.current) / 60000);
-                  }
-
-                  const newLog: RemoteLog = {
-                      id: uuidv4(),
-                      userId: currentUser.id,
-                      taskId: activeRemoteSession.id, 
-                      timestamp: new Date().toISOString(),
-                      type: 'ACTIVITY_RESUMED',
-                      activityLevel: 'ACTIVE',
-                      description: `بازگشت به کار پس از ${durationMinutes > 0 ? toPersianDigits(durationMinutes) + ' دقیقه' : 'مدتی'} عدم فعالیت.`
-                  };
-                  setRemoteLogs(prev => [...prev, newLog]);
-                  apiSaveRemoteLog(newLog); // API
-                  idleStartTimeRef.current = null;
-              }
+          // If using Browser Monitoring, or if System Detector is Active but we want to be safe
+          if (monitoringType === 'BROWSER' || (idleDetectorRef.current?.userState === 'active')) {
+              triggerResumeFromIdle();
           }
       };
       
@@ -345,7 +365,7 @@ const App: React.FC = () => {
           window.removeEventListener('click', handleActivity);
           window.removeEventListener('scroll', handleActivity);
       };
-  }, [currentUser, activeRemoteSession, monitoringType]); 
+  }, [monitoringType]); 
 
   // 2. Monitoring Logic Interval using Web Worker (Fix for Minimized Tabs)
   useEffect(() => {
@@ -445,20 +465,12 @@ const App: React.FC = () => {
               detector.addEventListener('change', () => {
                   const uState = detector.userState;
                   const sState = detector.screenState;
-                  // console.log(`Idle change: ${uState}, ${sState}`);
                   
+                  // CRITICAL FIX: If system reports active, TRIGGER RESUME IMMEDIATELY
+                  // Do NOT wait for browser events (mousemove) which don't fire when minimized
                   if (uState === 'active' && sState === 'unlocked') {
-                      // System is active again.
-                      // We update the local timestamp so our interval logic knows we are back.
                       lastActivityTime.current = Date.now();
-                      
-                      // Explicit resume logic if we were idle
-                      if (isIdleRef.current) {
-                          isIdleRef.current = false;
-                          setCurrentUserIsIdle(false);
-                          // We rely on the regular interval to catch state changes for logging, 
-                          // but updating lastActivityTime is critical here.
-                      }
+                      triggerResumeFromIdle();
                   }
               });
               

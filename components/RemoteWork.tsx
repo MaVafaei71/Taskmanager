@@ -233,13 +233,14 @@ const MonitoringView = ({ employees, activeSessions, logs }: { employees: Employ
       const liveData = activeSessions.filter(s => s.status !== 'COMPLETED').map(session => {
           const emp = employees.find(e => e.id === session.userId);
           
-          // Get the very last log for this user
-          const userLogs = logs.filter(l => l.userId === session.userId).sort((a,b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+          // Get the very last log for this user SPECIFIC TO THIS SESSION
+          // Filtering by l.taskId === session.id ensures we don't pick up old alerts from previous days
+          const userLogs = logs.filter(l => l.taskId === session.id).sort((a,b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
           const lastLog = userLogs[0];
           
           // Logic: If the LAST log was an alert, they are idle. 
           // If the LAST log was RESUMED (or anything else recent), they are active.
-          // We also keep the 2 minute buffer just in case the alert is very old (e.g. from yesterday's session that wasn't closed properly)
+          // If no logs exist yet (new session), lastLog is undefined, so isIdle is false (Active). Correct.
           const isIdle = lastLog && lastLog.type === 'ACTIVITY_ALERT' && (Date.now() - new Date(lastLog.timestamp).getTime() < 12 * 60 * 60 * 1000); // 12 hours max alert validity
 
           return { session, emp, isIdle };
